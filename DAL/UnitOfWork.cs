@@ -11,6 +11,7 @@ namespace DAL
 
         public UnitOfWork(string tenantId)
         {
+            //we should really pass this in, or retreive from a config file etc.  
             string connectionString = "UseDevelopmentStorage=true;";//DevelopmentStorageProxyUri=http://myProxyUri
 
             this.context = new AzureContext(connectionString, tenantId);
