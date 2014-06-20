@@ -8,7 +8,9 @@ namespace AzureTSProvider
 {
     public class TableEntityDTO   : DynamicObject,ITableEntity
     {
+        private bool isDirty = false;
         #region ITableEntity properties
+
         // Summary:
         //     Gets or sets the entity's current ETag. Set this value to '*' in order to
         //     blindly overwrite an entity as part of an update operation.
@@ -40,6 +42,18 @@ namespace AzureTSProvider
             this.PartitionKey = PartitionKey;
             this.RowKey = RowKey;
             properties = new Dictionary<string, EntityProperty>();
+        }
+
+        public bool IsDirty{ 
+            get
+            {
+                return isDirty;   
+            }
+
+            set
+            {
+                isDirty = value;
+            }
         }
 
         #region override DynamicObject's mehtods

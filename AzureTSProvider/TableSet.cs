@@ -1,6 +1,8 @@
 ﻿using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Table;
+using Newtonsoft.Json;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Dynamic;
 using System.Linq;
@@ -10,7 +12,7 @@ using System.Threading.Tasks;
 
 namespace AzureTSProvider
 {
-    public class TableSet<TEntity>
+    public class TableSet<TEntity> : ITableSet
     where TEntity : class,
         new()
     {
@@ -20,6 +22,9 @@ namespace AzureTSProvider
 
         internal CloudTableClient tableClient;
         internal CloudTable table;
+
+        internal List<TEntity> mappedList;
+        internal List<TableEntityDTO> internalList;
 
         public TableSet(string connectionString, string tableName)
         {
@@ -38,6 +43,10 @@ namespace AzureTSProvider
             tableClient = storageAccount.CreateCloudTableClient();
             table = tableClient.GetTableReference(tableName);
             table.CreateIfNotExists();
+
+            //initialise stuff
+            mappedList = new List<TEntity>();
+            internalList = new List<TableEntityDTO>();
         }
 
         public virtual TEntity GetByID(object id)
@@ -51,7 +60,6 @@ namespace AzureTSProvider
 
         public virtual List<TEntity> GetAll()
         {
-            List<TEntity> mappedList = new List<TEntity>();
             var query = new TableQuery().Where(TableQuery.GenerateFilterCondition("PartitionKey", QueryComparisons.Equal, partitionKey)); //get all customers - because Customer is our partition key
             var result = table.ExecuteQuery(query).ToList();
 
@@ -64,9 +72,59 @@ namespace AzureTSProvider
 
         public virtual void Insert(TEntity entity)
         {
+            //mappedList.Add(entity);
             TableEntityDTO mapped = CreateDTO(entity);
-            TableOperation insertOperation = TableOperation.Insert(mapped);
-            table.Execute(insertOperation);
+            mapped.IsDirty = true;
+
+            internalList.Add(mapped);
+            
+            //TableOperation insertOperation = TableOperation.Insert(mapped);
+            //table.Execute(insertOperation);
+
+        }
+
+        public virtual int Commit()
+        {
+            var batch = new TableBatchOperation();
+
+            //can only insert 100 rows at a time.
+            int count = 0;
+            int commitCount = 0;
+            int maxBatch = 100;
+
+            if (internalList.Count == 1)
+            {
+                //if we only have one item just perform a single (quicker) commit.
+                TableOperation insertSingle = TableOperation.Insert(internalList.First());
+                table.Execute(insertSingle);
+                commitCount = 1;
+            }
+            else
+            {
+                foreach (var e in internalList.Where(i => i.IsDirty))
+                {
+                    //TableEntityDTO mapped = CreateDTO(e);
+                    if (count < maxBatch)
+                    {
+                        batch.Insert(e);
+                        count++;
+                        commitCount++;
+                    }
+                    else
+                    {
+                        table.ExecuteBatch(batch);
+                        batch = new TableBatchOperation();
+                        count = 0;
+                    }
+                }
+
+                if (batch.Count > 0)
+                {
+                    table.ExecuteBatch(batch);
+                }
+            }
+
+            return commitCount;
         }
 
 
@@ -80,12 +138,31 @@ namespace AzureTSProvider
             Type t2 = dto.GetType();
 
 
+
+
             //now set all the entity properties
             foreach (System.Reflection.PropertyInfo p in t1.GetProperties())
             {
-                dto.TrySetMember(p.Name, p.GetValue(a, null) == null ? "" : p.GetValue(a, null));
-                if (IsId(p.Name))
-                    rowKey = p.GetValue(a, null);
+                 Type t = p.PropertyType;
+
+                 bool isNested = t.IsNested;
+                 bool isEnum = t.IsEnum;
+                 bool isGeneric = t.IsGenericType;
+                 bool isValueType = t.IsValueType;
+                 bool isClass = t.IsClass;
+
+                 if (t.IsGenericType && typeof(ICollection<>).IsAssignableFrom(t.GetGenericTypeDefinition()) ||
+                     t.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(ICollection<>)) || t.IsClass)
+                 {
+                     dto.TrySetMember(p.Name, JsonConvert.SerializeObject(p.GetValue(a, null)));
+                 }
+                 else
+                 {
+                     dto.TrySetMember(p.Name, p.GetValue(a, null) == null ? "" : p.GetValue(a, null));
+                     if (IsId(p.Name))
+                         rowKey = p.GetValue(a, null);
+
+                 }
             }
 
             if (rowKey == null)
@@ -93,6 +170,7 @@ namespace AzureTSProvider
 
             dto.RowKey = rowKey.ToString();
             dto.PartitionKey = partitionKey;
+            dto.Timestamp = DateTime.Now;
 
 
             return dto;
@@ -112,7 +190,17 @@ namespace AzureTSProvider
                 {
                     if (p1.Name == value.Key)
                     {
-                        p1.SetValue(result, GetValue(value.Value));
+                        Type t = p1.PropertyType;
+                        if (t.IsPrimitive || t == typeof(string))
+                        {
+                            p1.SetValue(result, GetValue(value.Value));
+                        }
+                        else if (t.IsGenericType && typeof(ICollection<>).IsAssignableFrom(t.GetGenericTypeDefinition()) ||
+                            t.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(ICollection<>)) || t.IsClass)
+                        {
+                            var customClass = JsonConvert.DeserializeObject(value.Value.StringValue, t);
+                            p1.SetValue(result, customClass);
+                        }
                     }
                 }
 
